@@ -1,7 +1,9 @@
 <!-- eslint-disable no-unused-vars -->
 <script>
-  const full_maze_size = 100;
-  const maze_size = Math.floor(full_maze_size / 10);
+  import Tile from './utils/Tile';
+
+  const full_maze_size = 20;
+  const maze_size = 10;
 
   export default {
     data: ()  => ({
@@ -12,7 +14,7 @@
       maze_size: maze_size,
       initial_board: [],
       full_board: [],
-      entropy_board: [],
+      color_pallet: []
     }),
     mounted() {
       this.setMouseEvents();
@@ -46,6 +48,7 @@
         this.initial_board = initial_board;
         this.full_board = full_board;
       },
+
       setMouseEvents() {
         window.addEventListener('mousedown', () => {
           this.mouse_active = true;
@@ -55,6 +58,7 @@
           this.mouse_active = false;
         })
       },
+
       draw(r_index, c_index) {
         if (!this.mouse_active) return;
 
@@ -63,76 +67,146 @@
 
         this.initial_board[r_index] = new_row;
       },
-      mapNextTileColors(r_index, c_index) {
-        const tiles = {
-          up: this.initial_board[r_index - 1] ? this.initial_board[r_index - 1][c_index] : null,
-          down: this.initial_board[r_index + 1] ? this.initial_board[r_index + 1][c_index] : null,
-          left: this.initial_board[r_index] ? this.initial_board[r_index][c_index - 1] : null,
-          right: this.initial_board[r_index] ? this.initial_board[r_index][c_index + 1] : null,
+
+      mapTileColor(r_index, c_index) {
+        const tile = new Tile([r_index, c_index], this.initial_board[r_index][c_index])
+
+        if (this.initial_board[r_index][c_index] !== '#FFFFFF') {
+          this.color_pallet = [...new Set([...this.color_pallet, this.initial_board[r_index][c_index]])];
         }
 
-        return tiles;
+        if (this.initial_board[r_index - 1] && this.initial_board[r_index - 1][c_index]) {
+          tile.up = this.initial_board[r_index - 1][c_index];
+        }
+
+        if (this.initial_board[r_index + 1] && this.initial_board[r_index + 1][c_index]) {
+          tile.down = this.initial_board[r_index + 1][c_index];
+        }
+
+        if (this.initial_board[r_index][c_index - 1]) {
+          tile.left = this.initial_board[r_index][c_index - 1];
+        }
+
+        if (this.initial_board[r_index][c_index + 1]) {
+          tile.right = this.initial_board[r_index][c_index + 1];
+        }
+
+        return tile;
       },
+
       getTilesCompatibility() {
-        const directions = ['up', 'down', 'left', 'right'];
-        const colors = {}
+        const colors_compatibility = []
 
         this.initial_board.forEach((row, r_index) => {
-          row.forEach((color, c_index) => {
-            const next_tiles_colors = this.mapNextTileColors(r_index, c_index);
-
-            if (!Object.keys(colors).includes(color)) {
-              colors[color] = directions.reduce((acc, direction) => {
-                if (!next_tiles_colors[direction]) {
-                  acc[direction] = [];
-                  return acc;
-                }
-
-                acc[direction] = [next_tiles_colors[direction]];
-                return acc;
-              }, {})
-            }
-
-            directions.forEach((direction) => {
-              if (!next_tiles_colors[direction]) return;
-              if (!colors[color][direction]) return;
-              if (colors[color][direction].includes(next_tiles_colors[direction])) return;
-
-              colors[color][direction].push(next_tiles_colors[direction]);
-            })
+          row.forEach((_color, c_index) => {
+            colors_compatibility.push(this.mapTileColor(r_index, c_index))
           })
         })
 
-        return colors;
+        return colors_compatibility;
       },
+
       randInt(min, max) {
         return Math.floor(Math.random() * (max - min + 1) + min);
       },
-      getPosAndColor(pos, color) {
-        let nex_pos;
-        let next_color;
 
-        return [nex_pos, next_color];
+      mapEntropy(curr_pos, curr_color, entropy_board) {
+        const entropy_index = entropy_board.findIndex(({ pos }) => pos.toString() === curr_pos.toString());
+        entropy_board[entropy_index] = { ...entropy_board[entropy_index], color: curr_color };
+
+        if (this.full_board[curr_pos[0] - 1] && this.full_board[curr_pos[0] - 1][curr_pos[1]]) {
+          const up_options = entropy_board.filter(tile => {
+            return [
+              tile.pos.toString() === [curr_pos[0] - 2, curr_pos[1]].toString(),
+              tile.pos.toString() === [curr_pos[0], curr_pos[1] - 1].toString(),
+              tile.pos.toString() === [curr_pos[0], curr_pos[1] + 1].toString(),
+              tile.pos.toString() === curr_pos.toString(),
+            ].some(Boolean)
+          }).length;
+          entropy_board.push({ options: up_options, pos: [curr_pos[0] - 1, curr_pos[1]], color: null});
+        }
+        
+        if (this.full_board[curr_pos[0] + 1] && this.full_board[curr_pos[0] + 1][curr_pos[1]]) {
+          const down_options = entropy_board.filter(tile => {
+            return [
+              tile.pos.toString() === [curr_pos[0] + 2, curr_pos[1]].toString(),
+              tile.pos.toString() === [curr_pos[0], curr_pos[1] - 1].toString(),
+              tile.pos.toString() === [curr_pos[0], curr_pos[1] + 1].toString(),
+              tile.pos.toString() === curr_pos.toString(),
+            ].some(Boolean)
+          }).length;
+          entropy_board.push({ options: down_options, pos: [curr_pos[0] + 1, curr_pos[1]], color: null});
+        }
+        
+        if (this.full_board[curr_pos[0]][curr_pos[1] - 1]) {
+          const left_options = entropy_board.filter(tile => {
+            return [
+              tile.pos.toString() === [curr_pos[0] - 1, curr_pos[1] - 2].toString(),
+              tile.pos.toString() === [curr_pos[0] + 1, curr_pos[1] - 2].toString(),
+              tile.pos.toString() === [curr_pos[0], curr_pos[1] - 1].toString(),
+              tile.pos.toString() === curr_pos.toString(),
+            ].some(Boolean)
+          }).length;
+          entropy_board.push({ options: left_options, pos: [curr_pos[0], curr_pos[1] - 1], color: null});
+        }
+        
+        if (this.full_board[curr_pos[0]][curr_pos[1] + 1]) {
+          const right_options = entropy_board.filter(tile => {
+            return [
+              tile.pos.toString() === [curr_pos[0] - 1, curr_pos[1] + 2].toString(),
+              tile.pos.toString() === [curr_pos[0] + 1, curr_pos[1] + 2].toString(),
+              tile.pos.toString() === [curr_pos[0], curr_pos[1] + 1].toString(),
+              tile.pos.toString() === curr_pos.toString(),
+            ].some(Boolean)
+          }).length;
+          entropy_board.push({ options: right_options, pos: [curr_pos[0], curr_pos[1] + 1], color: null});
+        }
+      },
+      mapNextColors(next_pos, entropy_board) {
+        return [...new Set(
+          this.colors_compatibility
+            .filter(tile => {
+              const directions = {
+                up: [next_pos.pos[0] - 1, next_pos.pos[1]].toString(),
+                down: [next_pos.pos[0] + 1, next_pos.pos[1]].toString(),
+                left: [next_pos.pos[0], next_pos.pos[1] - 1].toString(),
+                right: [next_pos.pos[0], next_pos.pos[1] + 1].toString(),
+              }
+              
+              const obj = {}
+              const entries = Object.entries(directions);
+              entries.forEach(([key, value]) => {
+                const color = entropy_board.filter((a) => a.color).find(tile => tile.pos.toString() === value);
+
+                if (color) {
+                  obj[key] = color.color;
+                }
+              })
+
+              return Object.entries(obj).every(([key, value]) => {
+                return tile[key] === value;
+              })
+            }).map(tile => tile.value)
+        )]
       },
       waveFunction() {
-        const colors_compatibility = this.getTilesCompatibility();
-        this.entropy_board = new Array(this.full_maze_size)
-          .fill(new Array(this.full_maze_size).fill(Infinity));
-        const backtrace = [];
-        
-        const colors_keys = Object.keys(colors_compatibility);
-        let curr_color = colors_keys[this.randInt(0, colors_keys.length - 1)];
+        this.colors_compatibility = this.getTilesCompatibility();
         let curr_pos = [this.randInt(0, this.full_maze_size), this.randInt(0, this.full_maze_size)];
+        let curr_color = this.color_pallet[this.randInt(0, this.color_pallet.length - 1)];
 
-        while (backtrace.length < this.full_maze_size * this.full_maze_size) {
+        const entropy_board = [{ options: 0, pos: curr_pos, color: curr_color}];
+        const backtrace = [];
+
+        while (backtrace.length < this.full_maze_size ** 2) {
           this.full_board[curr_pos[0]][curr_pos[1]] = curr_color;
-
+          this.mapEntropy(curr_pos, curr_color, entropy_board);
           backtrace.push(curr_pos.toString());
-          this.entropy_board[curr_pos[0]][curr_pos[1]] = 0;
-          
-          const [next_pos, next_color] = this.getPosAndColor(curr_pos, curr_color);
-          curr_pos = next_pos;
-          curr_color = next_color;
+
+          const next_pos = entropy_board.filter(({ color, pos }) => !color && !backtrace.includes(pos.toString())).sort((a, b) => b.options - a.options)[0];
+          const next_color = this.mapNextColors(next_pos, entropy_board);
+
+          curr_pos = next_pos.pos;
+          curr_color = next_color[this.randInt(0, next_color.length - 1)];
         }
       }
     }
@@ -171,6 +245,16 @@
             block
           >
             Finish
+          </v-btn>
+          <v-btn
+            @click="() => {
+              is_done = false;
+              create_boards();
+            }"
+            class="d-flex justify-center mt-2"
+            block
+          >
+            Clear
           </v-btn>
         </v-col>
       </v-row>
