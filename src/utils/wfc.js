@@ -1,3 +1,5 @@
+import { hexToRgb, rgbToHex } from './color'
+
 // Wave Function Collapse com regras de vizinhanca aprendidas de uma imagem de entrada.
 //
 // O "tile" pode ser um pixel (patternSize 1) ou um bloco NxN da entrada (patternSize > 1,
@@ -11,6 +13,19 @@
 // cor para ela (sorteada pela frequencia na entrada) e propagamos as consequencias:
 // os vizinhos perdem as cores que nunca apareceram ao lado dessa cor na entrada. Se
 // alguma celula ficar sem nenhuma opcao, houve uma contradicao e recomecamos.
+
+// Gerador de numeros aleatorios com semente (mulberry32): a mesma semente repete a mesma
+// geracao, o que permite contar os quadros de uma execucao e depois animar exatamente ela.
+export function seededRandom(seed) {
+  let state = seed >>> 0
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0
+    let t = state
+    t = Math.imul(t ^ (t >>> 15), t | 1)
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
 
 // cima, baixo, esquerda, direita. O oposto de i e i ^ 1 (0<->1, 2<->3).
 const DIRECTIONS = [[-1, 0], [1, 0], [0, -1], [0, 1]]
@@ -75,15 +90,26 @@ export function learnRules(input, patternSize = 1) {
   return { patterns, patternSize: n, weights, allowed }
 }
 
-// Uma tentativa. Devolve a matriz de indices de cor, ou null se houve contradicao.
-function attempt(rows, cols, { weights, allowed }, rnd) {
+// Uma tentativa, como gerador: cada `yield` e um quadro (uma celula decidida ou uma celula
+// processada na propagacao das consequencias) e o valor retornado e a grade de tiles, ou
+// null se houve contradicao.
+//
+// Cada quadro traz `undecided()` (quantas celulas ainda estao indecisas) e `view()`, que monta
+// o tabuleiro de PIXELS no estado atual: { color, alpha } por pixel, com alpha menor quanto
+// mais indecisa a celula. Os dois so valem ate o proximo `next()`, porque as estruturas
+// internas continuam sendo alteradas.
+function* attemptSteps(rows, cols, { patterns, patternSize, weights, allowed }, rnd) {
   const n = weights.length
   const cells = rows * cols
   const possible = new Uint8Array(cells * n).fill(1)
   const count = new Int32Array(cells).fill(n)
 
-  // Remove de `cell` as cores que nenhum vizinho ja decidido permite. Falso = contradicao.
-  const propagate = (start) => {
+  // Remove de cada vizinho as opcoes que nenhuma opcao da celula permite. E um gerador: cede um
+  // quadro a cada celula processada, para a animacao mostrar a restricao se espalhando.
+  // Retorna falso se alguma celula ficou sem opcoes (contradicao).
+  const info = { step: 0, focus: null }
+
+  function* propagate(start) {
     const stack = start
     while (stack.length) {
       const current = stack.pop()
@@ -114,6 +140,8 @@ function attempt(rows, cols, { weights, allowed }, rnd) {
         if (count[neighbor] === 0) return false
         if (changed) stack.push(neighbor)
       }
+
+      yield frame()
     }
     return true
   }
@@ -130,8 +158,60 @@ function attempt(rows, cols, { weights, allowed }, rnd) {
     return Math.log(sum) - sumLog / sum + rnd() * 1e-6
   }
 
-  // Poda inicial: cores que nao cabem em lugar nenhum (ex.: so aparecem no canto da entrada).
-  if (!propagate(Array.from({ length: cells }, (_, i) => i))) return null
+  // Tabuleiro de pixels no estado atual. Cada pixel pertence a uma celula (a ultima linha e
+  // coluna de pixels vem dos blocos da borda) e mostra a cor media das opcoes que ainda restam.
+  const rgbCache = new Map()
+  const rgb = (color) => {
+    if (!rgbCache.has(color)) rgbCache.set(color, hexToRgb(color) || [128, 128, 128])
+    return rgbCache.get(color)
+  }
+
+  const view = () => {
+    const board = []
+    for (let R = 0; R < rows + patternSize - 1; R += 1) {
+      const line = []
+      for (let C = 0; C < cols + patternSize - 1; C += 1) {
+        const r = Math.min(R, rows - 1)
+        const c = Math.min(C, cols - 1)
+        const cell = r * cols + c
+        const offset = (R - r) * patternSize + (C - c)
+
+        let first = null
+        let mixed = false
+        let total = 0
+        const sum = [0, 0, 0]
+        for (let k = 0; k < n; k += 1) {
+          if (!possible[cell * n + k]) continue
+          const color = patterns[k][offset]
+          if (first === null) first = color
+          else if (color !== first) mixed = true
+
+          const [red, green, blue] = rgb(color)
+          sum[0] += red * weights[k]
+          sum[1] += green * weights[k]
+          sum[2] += blue * weights[k]
+          total += weights[k]
+        }
+
+        if (!mixed) {
+          line.push({ color: first, alpha: 1 })
+        } else {
+          const certainty = n > 1 ? 1 - (count[cell] - 1) / (n - 1) : 1
+          line.push({ color: rgbToHex(sum.map((value) => Math.round(value / total))), alpha: 0.12 + 0.5 * certainty })
+        }
+      }
+      board.push(line)
+    }
+    return Object.freeze(board)
+  }
+
+  const undecided = () => count.reduce((total, value) => total + (value > 1 ? 1 : 0), 0)
+  const frame = () => ({ step: info.step, focus: info.focus, undecided, view })
+
+  // Poda inicial: tiles que nao cabem em lugar nenhum (ex.: so aparecem no canto da entrada).
+  if (!(yield* propagate(Array.from({ length: cells }, (_, i) => i)))) return null
+
+  yield frame()
 
   for (;;) {
     let next = -1
@@ -145,9 +225,9 @@ function attempt(rows, cols, { weights, allowed }, rnd) {
       }
     }
 
-    if (next === -1) break // todas as celulas tem exatamente uma cor
+    if (next === -1) break // todas as celulas tem exatamente uma opcao
 
-    // Sorteia a cor pelo peso (frequencia na entrada) entre as ainda possiveis.
+    // Sorteia pelo peso (frequencia na entrada) entre as opcoes ainda possiveis.
     let total = 0
     for (let k = 0; k < n; k += 1) if (possible[next * n + k]) total += weights[k]
     let pick = rnd() * total
@@ -162,24 +242,29 @@ function attempt(rows, cols, { weights, allowed }, rnd) {
     for (let k = 0; k < n; k += 1) possible[next * n + k] = k === chosen ? 1 : 0
     count[next] = 1
 
-    if (!propagate([next])) return null
+    info.step += 1
+    info.focus = [Math.floor(next / cols), next % cols]
+    yield frame()
+
+    if (!(yield* propagate([next]))) return null
   }
 
-  const board = []
+  const grid = []
   for (let r = 0; r < rows; r += 1) {
     const row = []
     for (let c = 0; c < cols; c += 1) {
       const cell = r * cols + c
       for (let k = 0; k < n; k += 1) if (possible[cell * n + k]) row.push(k)
     }
-    board.push(row)
+    grid.push(row)
   }
-  return board
+  return grid
 }
 
-// Gera um tabuleiro rows x cols parecido com a entrada. Em caso de contradicao, tenta de novo.
-// Retorna { ok, board, attempts }; `board` e uma matriz de cores (as mesmas da entrada).
-export function generate(input, { rows, cols, patternSize = 3, rnd = Math.random, maxAttempts = 100 } = {}) {
+// Gerador de alto nivel: cada `yield` e { attempt, step, focus, undecided, view } ou, quando
+// uma tentativa bate numa contradicao e recomeca, { attempt, restart: true }.
+// O valor retornado e { ok, attempts, board } (`board` e a matriz de cores da entrada).
+export function* collapse(input, { rows, cols, patternSize = 3, rnd = Math.random, maxAttempts = 100 } = {}) {
   const n = Math.min(patternSize, input.length, input[0].length)
   const rules = learnRules(input, n)
 
@@ -187,9 +272,17 @@ export function generate(input, { rows, cols, patternSize = 3, rnd = Math.random
   const gridRows = rows - n + 1
   const gridCols = cols - n + 1
 
-  for (let attempts = 1; attempts <= maxAttempts; attempts += 1) {
-    const grid = attempt(gridRows, gridCols, rules, rnd)
-    if (!grid) continue
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const run = attemptSteps(gridRows, gridCols, rules, rnd)
+
+    let step
+    while (!(step = run.next()).done) yield { attempt, ...step.value }
+
+    const grid = step.value
+    if (!grid) {
+      yield { attempt, restart: true }
+      continue
+    }
 
     const board = Array.from({ length: rows }, () => new Array(cols))
     grid.forEach((row, r) => row.forEach((k, c) => {
@@ -197,8 +290,17 @@ export function generate(input, { rows, cols, patternSize = 3, rnd = Math.random
       for (let i = 0; i < n; i += 1) for (let j = 0; j < n; j += 1) board[r + i][c + j] = pattern[i * n + j]
     }))
 
-    return { ok: true, attempts, board }
+    return { ok: true, attempts: attempt, board }
   }
 
   return { ok: false, attempts: maxAttempts, board: null }
+}
+
+// Gera sem animar. Retorna { ok, board, attempts }.
+export function generate(input, options) {
+  const run = collapse(input, options)
+
+  let step
+  while (!(step = run.next()).done);
+  return step.value
 }

@@ -1,5 +1,5 @@
 <script>
-  import { generate } from './utils/wfc';
+  import { collapse, seededRandom } from './utils/wfc';
   import ColorPicker from './components/ColorPicker.vue';
   import RangeSlider from './components/RangeSlider.vue';
 
@@ -12,6 +12,15 @@
       is_done: false,
       error: "",
       attempts: 0,
+      run_id: 0, // incrementa para cancelar uma animacao em andamento
+      animating: false,
+      skipping: false,
+      anim_speed: 5, // 1 (lento) a 10 (rapido)
+      durations: [20, 12, 8, 5, 3.5, 2.5, 1.5, 1, 0.5, 0.2], // segundos por velocidade
+      view_board: null, // tabuleiro de pixels {color, alpha} do passo atual
+      focus: null, // celula decidida no ultimo passo
+      undecided: 0,
+      restarts: 0,
       tool: "draw", // draw | erase
       color: "#000000",
       full_maze_size: 20,
@@ -23,7 +32,12 @@
     computed: {
       // tabuleiro mostrado: o desenho de entrada ou o resultado gerado
       board() {
+        if (this.animating && this.view_board) return this.view_board;
         return this.is_done ? this.full_board : this.initial_board;
+      },
+      // Duracao pretendida da animacao, em segundos, para a velocidade escolhida.
+      duration() {
+        return this.durations[this.anim_speed - 1];
       },
       // cores ja usadas no desenho (sem o branco, que e a borracha)
       used_colors() {
@@ -58,7 +72,8 @@
 
         this.maze_size = size;
         this.initial_board = board;
-        this.is_done = false; // o resultado anterior era de outro desenho
+        this.cancel(); // o resultado (ou a animacao) era de outro desenho
+        this.is_done = false;
         this.error = "";
       },
 
@@ -91,29 +106,96 @@
         this.initial_board[r_index] = new_row;
       },
 
-      finish() {
-        const result = generate(this.initial_board, {
-          rows: this.full_maze_size,
-          cols: this.full_maze_size
-        });
+      cancel() {
+        this.run_id += 1;
+        this.animating = false;
+        this.skipping = false;
+        this.view_board = null;
+        this.focus = null;
+      },
 
+      // Roda o WFC passo a passo, desenhando o estado a cada quadro. Celulas indecisas ficam
+      // transparentes (quanto menos opcoes, mais opacas) e a ultima decidida ganha um contorno.
+      async finish() {
+        this.cancel();
+        const run_id = this.run_id;
+
+        const options = { rows: this.full_maze_size, cols: this.full_maze_size };
+
+        // Passada rapida so para contar os quadros; a animacao repete a mesma execucao (mesma
+        // semente) e mostra varios quadros por vez para durar o tempo escolhido no slider.
+        const seed = Math.floor(Math.random() * 2 ** 32);
+        const counter = collapse(this.initial_board, { ...options, rnd: seededRandom(seed) });
+        let frames = 0;
+        while (!counter.next().done) frames += 1;
+
+        const run = collapse(this.initial_board, { ...options, rnd: seededRandom(seed) });
+        const batch_size = Math.max(1, Math.ceil(frames / (this.duration * 60)));
+
+        this.error = "";
+        this.restarts = 0;
+        this.is_done = true;
+        this.animating = true;
+
+        let step;
+        for (;;) {
+          const delay = this.skipping ? 0 : 16;
+          const batch = this.skipping ? Infinity : batch_size;
+
+          let last = null;
+          for (let i = 0; i < batch; i += 1) {
+            step = run.next();
+            if (step.done) break;
+
+            if (step.value.restart) this.restarts += 1;
+            last = step.value;
+          }
+
+          if (run_id !== this.run_id) return; // cancelado (Clear, outro tamanho, outro Finish)
+          if (step.done) break;
+
+          // view() so vale antes do proximo next(); por isso e chamada aqui, logo apos o lote
+          if (last && last.view) {
+            this.view_board = last.view();
+            this.focus = last.focus;
+            this.undecided = last.undecided();
+          }
+
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          if (run_id !== this.run_id) return;
+        }
+
+        const result = step.value;
         this.attempts = result.attempts;
+        this.animating = false;
+        this.skipping = false;
+        this.view_board = null;
+        this.focus = null;
 
         if (!result.ok) {
+          this.is_done = false;
           this.error = "Could not build a board from this drawing. Try drawing more of the pattern.";
           return;
         }
 
-        this.error = "";
         this.full_board = result.board;
-        this.is_done = true;
+      },
+
+      skip() {
+        this.skipping = true;
       },
 
       clear() {
+        this.cancel();
         this.is_done = false;
         this.error = "";
         this.attempts = 0;
         this.create_boards();
+      },
+
+      tileStyle(cell) {
+        if (typeof cell === "string") return { backgroundColor: cell };
+        return { backgroundColor: cell.color, opacity: cell.alpha };
       }
     }
   }
@@ -158,15 +240,33 @@
         :max="40"
         @change="resizeOutput"
       />
+      <RangeSlider
+        v-model="anim_speed"
+        label="Animation speed"
+        :value-text="`~${duration} s`"
+        hint="slow to fast"
+        :min="1"
+        :max="10"
+      />
       <v-row>
         <v-col>
           <v-btn
             @click="finish"
+            :disabled="animating"
             class="d-flex justify-center mt-2"
             color="success"
             block
           >
             Finish
+          </v-btn>
+          <v-btn
+            v-if="animating"
+            @click="skip"
+            class="d-flex justify-center mt-2"
+            variant="tonal"
+            block
+          >
+            Skip animation
           </v-btn>
           <v-btn
             @click="clear"
@@ -175,7 +275,11 @@
           >
             Clear
           </v-btn>
-          <v-alert v-if="error" class="mt-4" type="warning" density="compact">
+          <v-alert v-if="animating" class="mt-4" type="info" density="compact">
+            {{ undecided }} cells undecided<span v-if="restarts"> · restarted {{ restarts }}x</span>
+            <div class="legend">Faded = undecided. Red outline = just decided.</div>
+          </v-alert>
+          <v-alert v-else-if="error" class="mt-4" type="warning" density="compact">
             {{ error }}
           </v-alert>
           <v-alert v-else-if="is_done" class="mt-4" type="success" density="compact">
@@ -198,8 +302,8 @@
           :key="c_index + '- col - ' + r_index + ' - row'"
           @mouseover="draw(r_index, c_index)"
           @mousedown="paint(r_index, c_index)"
-          :style="{ backgroundColor: col }"
-          class="col"
+          :style="tileStyle(col)"
+          :class="{ col: true, tile_focus: focus && focus[0] === r_index && focus[1] === c_index }"
           draggable="false"
         ></div>
       </div>
@@ -252,6 +356,19 @@ body {
 .col {
   min-width: 0;
   min-height: 0;
+}
+
+.tile_focus {
+  position: relative;
+  z-index: 1;
+  outline: 2px solid #e53935;
+  outline-offset: -2px;
+}
+
+.legend {
+  margin-top: 4px;
+  font-size: 0.75rem;
+  opacity: 0.85;
 }
 
 @media only screen and (max-width: 900px) {
