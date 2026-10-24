@@ -1,14 +1,21 @@
 <script>
   import { generate } from './utils/wfc';
+  import ColorPicker from './components/ColorPicker.vue';
+  import RangeSlider from './components/RangeSlider.vue';
+
+  const WHITE = '#FFFFFF';
 
   export default {
+    components: { ColorPicker, RangeSlider },
     data: ()  => ({
       mouse_active: false,
       is_done: false,
       error: "",
       attempts: 0,
-      pencil_value: "#000000",
+      tool: "draw", // draw | erase
+      color: "#000000",
       full_maze_size: 20,
+      output_input: 20, // valor do slider enquanto ele e arrastado
       maze_size: 10,
       initial_board: [],
       full_board: []
@@ -17,6 +24,10 @@
       // tabuleiro mostrado: o desenho de entrada ou o resultado gerado
       board() {
         return this.is_done ? this.full_board : this.initial_board;
+      },
+      // cores ja usadas no desenho (sem o branco, que e a borracha)
+      used_colors() {
+        return [...new Set(this.initial_board.flat())].filter((color) => color !== WHITE);
       }
     },
     mounted() {
@@ -29,11 +40,33 @@
       window.removeEventListener('mouseup', this.onMouseUp);
     },
     methods: {
-      create_boards() {
-        const blank = (size) => Array.from({ length: size }, () => new Array(size).fill('#FFFFFF'));
+      blank(size) {
+        return Array.from({ length: size }, () => new Array(size).fill(WHITE));
+      },
 
-        this.initial_board = blank(this.maze_size);
-        this.full_board = blank(this.full_maze_size);
+      create_boards() {
+        this.initial_board = this.blank(this.maze_size);
+        this.full_board = this.blank(this.full_maze_size);
+      },
+
+      // Muda o tamanho do desenho mantendo o que ja foi pintado (a partir do canto superior esquerdo).
+      resizeInput(size) {
+        const board = this.blank(size);
+        this.initial_board.forEach((row, r) => row.forEach((color, c) => {
+          if (r < size && c < size) board[r][c] = color;
+        }));
+
+        this.maze_size = size;
+        this.initial_board = board;
+        this.is_done = false; // o resultado anterior era de outro desenho
+        this.error = "";
+      },
+
+      // Muda o tamanho do resultado; se ja havia um, gera de novo no tamanho novo.
+      resizeOutput(size) {
+        this.full_maze_size = size;
+        this.full_board = this.blank(size);
+        if (this.is_done) this.finish();
       },
 
       onMouseDown() {
@@ -46,9 +79,14 @@
 
       draw(r_index, c_index) {
         if (!this.mouse_active || this.is_done) return;
+        this.paint(r_index, c_index);
+      },
+
+      paint(r_index, c_index) {
+        if (this.is_done) return;
 
         const new_row = [...this.initial_board[r_index]];
-        new_row[c_index] = this.pencil_value;
+        new_row[c_index] = this.tool === "erase" ? WHITE : this.color;
 
         this.initial_board[r_index] = new_row;
       },
@@ -85,30 +123,46 @@
   <div class="container">
     <div class="panel">
       <v-row>
-        <v-col class="my-5 d-flex justify-center">
-          <v-color-picker
-            v-model="pencil_value"
-          ></v-color-picker>
+        <v-col>
+          <ColorPicker v-model="color" :swatches="used_colors" @update:model-value="tool = 'draw'" />
         </v-col>
       </v-row>
       <v-row>
         <v-col>
-          <v-btn-toggle v-model="pencil_value" class="d-flex justify-center">
-            <v-btn value="#000000">
+          <v-btn-toggle v-model="tool" mandatory class="d-flex justify-center">
+            <v-btn value="draw">
               <v-icon>mdi-pencil</v-icon>
             </v-btn>
 
-            <v-btn value="#FFFFFF">
+            <v-btn value="erase">
               <v-icon>mdi-eraser-variant</v-icon>
             </v-btn>
           </v-btn-toggle>
         </v-col>
       </v-row>
+      <RangeSlider
+        :model-value="maze_size"
+        label="Drawing size"
+        :value-text="`${maze_size} × ${maze_size}`"
+        hint="keeps your drawing"
+        :min="5"
+        :max="24"
+        @update:model-value="resizeInput"
+      />
+      <RangeSlider
+        v-model="output_input"
+        label="Result size"
+        :value-text="`${output_input} × ${output_input}`"
+        hint="regenerates the result"
+        :min="10"
+        :max="40"
+        @change="resizeOutput"
+      />
       <v-row>
         <v-col>
           <v-btn
             @click="finish"
-            class="d-flex justify-center"
+            class="d-flex justify-center mt-2"
             color="success"
             block
           >
@@ -143,6 +197,7 @@
           v-for="(col, c_index) in row"
           :key="c_index + '- col - ' + r_index + ' - row'"
           @mouseover="draw(r_index, c_index)"
+          @mousedown="paint(r_index, c_index)"
           :style="{ backgroundColor: col }"
           class="col"
           draggable="false"
